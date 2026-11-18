@@ -33,9 +33,15 @@ export async function GET() {
     const r = await ai.models.embedContent({ model: "gemini-embedding-001", contents: Array.from({ length: 15 }, (_, i) => `text ${i}`), config: { outputDimensionality: 768 } });
     return r.embeddings?.length;
   }));
-  for (const model of [process.env.CHAT_MODEL, "gemini-3.8-flash", "gemini-3.6-flash"].filter(Boolean) as string[]) {
-    out.push(await step(`generate:${model}`, async () => {
-      const r = await ai.models.generateContent({ model, contents: "Reply with the single word OK." });
+  const tests: [string, Record<string, unknown>][] = [
+    ["gemini-3.8-flash", { thinkingConfig: { thinkingBudget: 0 } }],
+    ["gemini-3.5-flash-lite", {}],
+    ["gemini-3.1-flash-lite", {}],
+    ["gemini-3.6-flash", {}],
+  ];
+  for (const [model, config] of tests) {
+    out.push(await step(`generate:${model}:${JSON.stringify(config)}`, async () => {
+      const r = await ai.models.generateContent({ model, contents: "Reply with the single word OK.", config });
       return r.text?.slice(0, 20);
     }));
   }
