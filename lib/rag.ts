@@ -8,10 +8,17 @@ const DIMS = 768;
 const TOP_K = 4;
 const MIN_SIMILARITY = parseFloat(process.env.MIN_SIMILARITY || "0.45");
 
-// CHAT_MODEL first, then fallbacks if Google retires a model.
+// CHAT_MODEL first, then fallbacks. Lite models come first: they answer short grounded
+// questions in under a second, while larger Flash models are often overloaded (503).
 const CHAT_MODELS = [
-  ...new Set([process.env.CHAT_MODEL, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"].filter(Boolean) as string[]),
+  ...new Set(
+    [process.env.CHAT_MODEL, "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash"].filter(
+      Boolean
+    ) as string[]
+  ),
 ];
+const MODEL_TIMEOUT_MS = 8_000; // per model attempt
+const TOTAL_BUDGET_MS = 22_000; // stay well under the 30s function limit
 
 export const NOT_FOUND = {
   en: "I can only answer questions about Tahel's work, projects and skills, and I couldn't find that in her portfolio. You can ask her directly at tael6688@gmail.com.",
@@ -62,23 +69,42 @@ function index() {
   return _index;
 }
 
-function isModelUnavailable(e: unknown) {
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(Object.assign(new Error("timeout"), { status: 408 })), ms)),
+  ]);
+}
+
+// Worth trying another model: retired (404), overloaded (503), rate-limited (429) or too slow (408).
+function shouldTryNext(e: unknown) {
   const status = (e as { status?: number })?.status;
   const msg = String((e as { message?: string })?.message ?? e).toLowerCase();
-  return status === 404 || msg.includes("not found") || msg.includes("is not supported") || msg.includes("deprecated");
+  return (
+    status === 404 || status === 408 || status === 429 || status === 500 || status === 503 ||
+    msg.includes("not found") || msg.includes("is not supported") || msg.includes("deprecated") ||
+    msg.includes("unavailable") || msg.includes("overloaded") || msg.includes("high demand")
+  );
 }
 
 async function generate(contents: string) {
+  const start = Date.now();
   let lastError: unknown;
   for (const model of CHAT_MODELS) {
+    const left = TOTAL_BUDGET_MS - (Date.now() - start);
+    if (left < 1_500) break;
     try {
-      return await ai().models.generateContent({ model, contents, config: { systemInstruction: SYSTEM, temperature: 0.2 } });
+      return await withTimeout(
+        ai().models.generateContent({ model, contents, config: { systemInstruction: SYSTEM, temperature: 0.2 } }),
+        Math.min(MODEL_TIMEOUT_MS, left)
+      );
     } catch (e) {
-      if (!isModelUnavailable(e)) throw e;
+      if (!shouldTryNext(e)) throw e;
+      console.warn(`[rag] ${model} failed (${(e as { status?: number })?.status ?? "?"}), trying next`);
       lastError = e;
     }
   }
-  throw lastError;
+  throw lastError ?? new Error("no model available");
 }
 
 export type Msg = { role: "user" | "assistant"; content: string };

@@ -11,7 +11,7 @@ Personal developer portfolio with a **RAG chatbot that answers questions about m
 4. **Answer:** Gemini Flash answers only from the retrieved chunks, in the question's language (English or Hebrew). The chunk ids are returned as sources.
 
 Safety: questions are limited to 500 characters, history is sanitized, and there is a best-effort rate limit (20 questions per IP per 10 minutes). The API key stays on the server.
-The chat model falls back automatically (`CHAT_MODEL` → `gemini-3.8-flash` → `gemini-3.6-flash` → `gemini-3.5-flash-lite`) if a model is retired.
+The chat model falls back automatically (`CHAT_MODEL` → `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-3.8-flash` → `gemini-3.6-flash`) when a model is retired, overloaded (503), rate-limited or slower than 8 seconds.
 
 ## Run locally
 ```bash
