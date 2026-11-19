@@ -1,7 +1,8 @@
 // RAG over the knowledge base: embed chunks once (cached per server instance),
 // embed the question, cosine similarity, threshold, then Gemini answers only from the top chunks.
 import { GoogleGenAI } from "@google/genai";
-import { KNOWLEDGE, type Chunk } from "./knowledge";
+import { KNOWLEDGE, knowledgeHash, type Chunk } from "./knowledge";
+import { PREBUILT } from "./embeddings.generated";
 
 const EMBED_MODEL = "gemini-embedding-001";
 const DIMS = 768;
@@ -79,9 +80,12 @@ async function embed(texts: string[], taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVA
   }
 }
 
-// Chunk embeddings are computed once per server instance and reused.
+// Chunk embeddings: prebuilt at deploy time when available, otherwise computed once per server instance.
 let _index: Promise<{ chunk: Chunk; vec: number[] }[]> | null = null;
 function index() {
+  if (!_index && PREBUILT && PREBUILT.hash === knowledgeHash() && PREBUILT.vectors.length === KNOWLEDGE.length) {
+    _index = Promise.resolve(KNOWLEDGE.map((chunk, i) => ({ chunk, vec: PREBUILT!.vectors[i] })));
+  }
   if (!_index) {
     _index = embed(
       KNOWLEDGE.map((c) => `${c.title}\n${c.text}`),
@@ -144,16 +148,45 @@ async function generate(contents: string, lang: "he" | "en"): Promise<string> {
   throw lastError ?? new Error("no model available");
 }
 
+// Small in-memory caches (per server instance) to save API quota on repeated questions,
+// such as the suggested questions on the page.
+const ANSWER_TTL_MS = 12 * 60 * 60_000;
+const answerCache = new Map<string, { at: number; value: Answer }>();
+const queryVecCache = new Map<string, number[]>();
+const cacheKey = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ").replace(/[?!.]+$/, "");
+function remember<K, V>(map: Map<K, V>, key: K, value: V, max = 300) {
+  if (map.size >= max) map.delete(map.keys().next().value as K);
+  map.set(key, value);
+}
+async function embedQuery(query: string) {
+  const key = cacheKey(query);
+  const hit = queryVecCache.get(key);
+  if (hit) return hit;
+  const [vec] = await embed([query], "RETRIEVAL_QUERY");
+  remember(queryVecCache, key, vec);
+  return vec;
+}
+
 export type Msg = { role: "user" | "assistant"; content: string };
 export type Answer = { answer: string; sources: { id: string; title: string }[]; found: boolean };
 
 export async function answer(question: string, history: Msg[] = []): Promise<Answer> {
+  // Questions without conversation context are cached.
+  const key = history.length === 0 ? cacheKey(question) : null;
+  const cached = key ? answerCache.get(key) : undefined;
+  if (cached && Date.now() - cached.at < ANSWER_TTL_MS) return cached.value;
+  const value = await answerUncached(question, history);
+  if (key && value.found) remember(answerCache, key, { at: Date.now(), value });
+  return value;
+}
+
+async function answerUncached(question: string, history: Msg[]): Promise<Answer> {
   const lang = isHebrew(question) ? "he" : "en";
   // A short follow-up ("and the stack?") is embedded together with the previous question.
   const lastUser = [...history].reverse().find((m) => m.role === "user")?.content ?? "";
   const query = question.length < 40 && lastUser ? `${lastUser}\n${question}` : question;
 
-  const [idx, [q]] = await Promise.all([index(), embed([query], "RETRIEVAL_QUERY")]);
+  const [idx, q] = await Promise.all([index(), embedQuery(query)]);
   const ranked = idx
     .map(({ chunk, vec }) => ({ chunk, score: dot(q, vec) }))
     .sort((a, b) => b.score - a.score)
