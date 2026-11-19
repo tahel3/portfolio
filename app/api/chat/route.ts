@@ -32,7 +32,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(await answer(question.trim(), safeHistory));
   } catch (e) {
     console.error(e);
-    const status = (e as { status?: number })?.status === 429 ? 503 : 500;
-    return NextResponse.json({ error: "unavailable" }, { status });
+    const err = e as { status?: number; message?: string };
+    const status = err.status === 429 ? 503 : 500;
+    // A short, non-secret reason helps diagnose failures from the browser.
+    const reason = `${err.status ?? ""} ${String(err.message ?? e).replace(/key=[^&\s]+/gi, "key=***").slice(0, 160)}`.trim();
+    return NextResponse.json({ error: "unavailable", reason }, { status });
   }
 }
