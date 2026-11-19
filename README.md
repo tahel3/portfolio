@@ -10,7 +10,7 @@ Personal developer portfolio with a **RAG chatbot that answers questions about m
 3. **Threshold:** if the best match is below `REFUSE_BELOW` (in `lib/rag.ts`), the question is clearly off-topic and the bot refuses **without calling the LLM**.
 4. **Answer:** Gemini answers only from the retrieved chunks, in the question's language (English or Hebrew), as an honest advocate: direct answer first, strongest evidence first (production work, then projects, then coursework), at most 4 sentences. The closest chunk ids are returned as sources.
 
-Quota: repeated questions (for example the suggested ones) are answered from an in-memory cache, and question embeddings are cached too.
+Quota: the first question of a conversation is sent as a GET request, and successful answers are cached by the Vercel CDN for 12 hours, so the suggested questions cost no API quota after the first time. There is also a per-instance in-memory cache for answers and query embeddings.
 
 Safety: questions are limited to 500 characters, history is sanitized, and there is a best-effort rate limit (20 questions per IP per 10 minutes). The API key stays on the server.
 Model chain: `CHAT_MODEL` (if set) → `gemini-3.8-flash` without thinking (4s limit) → `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-3.6-flash`. The next model is tried when one is retired, overloaded (503), rate-limited or too slow, within a 22s total budget.

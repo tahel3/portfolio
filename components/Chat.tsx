@@ -35,11 +35,15 @@ export default function Chat() {
     setInput("");
     setLoading(true);
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, history }),
-      });
+      // First question of a conversation: GET, so the CDN can cache common questions.
+      const res =
+        history.length === 0
+          ? await fetch(`/api/chat?q=${encodeURIComponent(question)}`)
+          : await fetch("/api/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ question, history }),
+            });
       if (res.status === 429) throw new Error("rate");
       const data = await res.json();
       if (!res.ok || !data.answer) throw new Error("fail");
