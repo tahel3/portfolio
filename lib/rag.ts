@@ -36,7 +36,7 @@ How to answer:
 1. First sentence answers the question directly (for example "Yes, ..." or a one-line summary).
 2. Then give the 1-3 strongest pieces of evidence, strongest first: production work at Bpreven, then projects she built, then coursework. Prefer concrete things she built over a skill merely being listed.
 3. When it helps, connect the evidence to what an employer gets (for example "so she can own a feature across the stack").
-4. At most 4 sentences. Plain text, no Markdown, no bullet points. Talk about Tahel in the third person.
+4. Keep it short: at most 3 sentences and about 70 words in total. Pick the best evidence, do not list everything. Plain text, no Markdown, no bullet points. Talk about Tahel in the third person.
 5. For general questions ("tell me about her", "does she have experience", "why hire her"), start from the summary passage.
 6. Role priority when framing her: Full-Stack Developer first, then AI Engineer, Backend, Frontend.
 7. Questions about seniority or the short experience: be honest that her professional role was about 5 months, then show its depth.
@@ -62,12 +62,21 @@ function normalize(v: number[]) {
 const dot = (a: number[], b: number[]) => a.reduce((s, x, i) => s + x * b[i], 0);
 
 async function embed(texts: string[], taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY") {
-  const res = await ai().models.embedContent({
-    model: EMBED_MODEL,
-    contents: texts,
-    config: { taskType, outputDimensionality: DIMS },
-  });
-  return res.embeddings!.map((e) => normalize(e.values!));
+  // Retries briefly on rate limits / overload (e.g. several cold starts at once).
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await ai().models.embedContent({
+        model: EMBED_MODEL,
+        contents: texts,
+        config: { taskType, outputDimensionality: DIMS },
+      });
+      return res.embeddings!.map((e) => normalize(e.values!));
+    } catch (e) {
+      const status = (e as { status?: number })?.status;
+      if (attempt >= 2 || !(status === 429 || status === 500 || status === 503)) throw e;
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1) + Math.random() * 500));
+    }
+  }
 }
 
 // Chunk embeddings are computed once per server instance and reused.
@@ -101,17 +110,24 @@ function shouldTryNext(e: unknown) {
   );
 }
 
-async function generate(contents: string) {
+// A Hebrew answer containing Arabic letters is a known glitch of some models: reject it and try the next model.
+const ARABIC = /[\u0600-\u06FF]/;
+
+async function generate(contents: string, lang: "he" | "en") {
   const start = Date.now();
   let lastError: unknown;
   for (const { model, timeoutMs, config } of CHAT_MODELS) {
     const left = TOTAL_BUDGET_MS - (Date.now() - start);
     if (left < 1_500) break;
     try {
-      return await withTimeout(
+      const resp = await withTimeout(
         ai().models.generateContent({ model, contents, config: { systemInstruction: SYSTEM, temperature: 0, ...config } }),
         Math.min(timeoutMs, left)
       );
+      if (lang === "he" && ARABIC.test(resp.text || "")) {
+        throw Object.assign(new Error("mixed script in Hebrew answer"), { status: 500 });
+      }
+      return resp;
     } catch (e) {
       if (!shouldTryNext(e)) throw e;
       console.warn(`[rag] ${model} failed (${(e as { status?: number })?.status ?? "?"}), trying next`);
@@ -152,7 +168,8 @@ export async function answer(question: string, history: Msg[] = []): Promise<Ans
     .join("\n");
 
   const resp = await generate(
-    `Passages:\n${context}\n\n${recent ? `Recent conversation:\n${recent}\n\n` : ""}Refusal sentence: "${NOT_FOUND[lang]}"\n\nQuestion: ${question}`
+    `Passages:\n${context}\n\n${recent ? `Recent conversation:\n${recent}\n\n` : ""}Refusal sentence: "${NOT_FOUND[lang]}"\n\nQuestion: ${question}`,
+    lang
   );
   const text = (resp.text || "").trim();
   if (!text || text === NOT_FOUND[lang]) return { answer: NOT_FOUND[lang], sources: [], found: false };
