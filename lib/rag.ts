@@ -36,7 +36,7 @@ How to answer:
 1. First sentence answers the question directly (for example "Yes, ..." or a one-line summary).
 2. Then give the 1-3 strongest pieces of evidence, strongest first: production work at Bpreven, then projects she built, then coursework. Prefer concrete things she built over a skill merely being listed.
 3. When it helps, connect the evidence to what an employer gets (for example "so she can own a feature across the stack").
-4. Keep it short: at most 3 sentences and about 70 words in total. Pick the best evidence, do not list everything. Plain text, no Markdown, no bullet points. Talk about Tahel in the third person.
+4. Keep it short: at most 3 sentences and about 60 words in total. Pick the best evidence, do not list everything. Plain text, no Markdown, no bullet points. Talk about Tahel in the third person.
 5. For general questions ("tell me about her", "does she have experience", "why hire her"), start from the summary passage.
 6. Role priority when framing her: Full-Stack Developer first, then AI Engineer, Backend, Frontend.
 7. Questions about seniority or the short experience: be honest that her professional role was about 5 months, then show its depth.
@@ -113,27 +113,34 @@ function shouldTryNext(e: unknown) {
 // A Hebrew answer containing Arabic letters is a known glitch of some models: reject it and try the next model.
 const ARABIC = /[\u0600-\u06FF]/;
 
-async function generate(contents: string, lang: "he" | "en") {
+async function generate(contents: string, lang: "he" | "en"): Promise<string> {
   const start = Date.now();
   let lastError: unknown;
+  let backup: string | null = null; // a Hebrew answer with stray Arabic letters, used only if nothing cleaner arrives
   for (const { model, timeoutMs, config } of CHAT_MODELS) {
     const left = TOTAL_BUDGET_MS - (Date.now() - start);
     if (left < 1_500) break;
+    // The strongest model writes the cleanest Hebrew, so it gets more time for Hebrew questions.
+    const limit = lang === "he" && model === "gemini-3.8-flash" ? 8_000 : timeoutMs;
     try {
       const resp = await withTimeout(
         ai().models.generateContent({ model, contents, config: { systemInstruction: SYSTEM, temperature: 0, ...config } }),
-        Math.min(timeoutMs, left)
+        Math.min(limit, left)
       );
-      if (lang === "he" && ARABIC.test(resp.text || "")) {
-        throw Object.assign(new Error("mixed script in Hebrew answer"), { status: 500 });
+      const text = (resp.text || "").trim();
+      if (lang === "he" && ARABIC.test(text)) {
+        backup ??= text;
+        console.warn(`[rag] ${model} mixed scripts in Hebrew, trying next`);
+        continue;
       }
-      return resp;
+      return text;
     } catch (e) {
       if (!shouldTryNext(e)) throw e;
       console.warn(`[rag] ${model} failed (${(e as { status?: number })?.status ?? "?"}), trying next`);
       lastError = e;
     }
   }
+  if (backup) return backup.replace(/[\u0600-\u06FF]+/g, "").replace(/\s{2,}/g, " ");
   throw lastError ?? new Error("no model available");
 }
 
@@ -171,7 +178,7 @@ export async function answer(question: string, history: Msg[] = []): Promise<Ans
     `Passages:\n${context}\n\n${recent ? `Recent conversation:\n${recent}\n\n` : ""}Refusal sentence: "${NOT_FOUND[lang]}"\n\nQuestion: ${question}`,
     lang
   );
-  const text = (resp.text || "").trim();
+  const text = resp.trim();
   if (!text || text === NOT_FOUND[lang]) return { answer: NOT_FOUND[lang], sources: [], found: false };
 
   return {
